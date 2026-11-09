@@ -22,3 +22,6 @@ imgui.ini
 checkpoints/
 
 .context/
+/.kilo
+/.coba
+*.onnx

@@ -1,0 +1,23 @@
+{
+  "name": "com.nvlabs.motionbricks",
+  "version": "0.1.0",
+  "displayName": "MotionBricks Unity Runtime",
+  "description": "Runs the MotionBricks SOMA motion generation model natively in Unity (ONNX Runtime, DirectML/CUDA/CPU) and retargets the generated motion onto any VRM humanoid avatar. Works in Editor and Windows standalone builds.",
+  "unity": "6000.5",
+  "documentationUrl": "https://github.com/NVlabs/motionbricks/blob/main/docs/runtime_api.md",
+  "licensesUrl": "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-agreement/",
+  "keywords": [
+    "motion",
+    "animation",
+    "onnx",
+    "generative",
+    "soma"
+  ],
+  "dependencies": {
+    "com.unity.ai.inference": "2.6.1"
+  },
+  "author": {
+    "name": "Local MotionBricks Unity integration"
+  },
+  "type": "tool"
+}

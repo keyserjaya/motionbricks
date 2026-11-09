@@ -1,0 +1,1 @@
+put in {project}/motionbricks/assets/onnx/soma/unity

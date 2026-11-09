@@ -1,0 +1,24 @@
+fileFormatVersion: 2
+guid: 1e8b3c5d7a9f4b2e6c8d0a1f3b5e7c94
+PluginImporter:
+  serializedVersion: 2
+  defineConstraints: []
+  isPreloaded: 0
+  isOverridable: 0
+  isExplicitlyReferenced: 0
+  validateReferences: 1
+  platformData:
+  - first:
+      Any:
+    second:
+      enabled: 1
+      settings: {}
+  - first:
+      Editor: Editor
+    second:
+      enabled: 0
+      settings:
+        DefaultValueInitialized: true
+  userData:
+  assetBundleName:
+  assetBundleVariant:
