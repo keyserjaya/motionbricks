@@ -238,6 +238,22 @@ namespace MotionBricks
             return Vector3.LerpUnclamped(_generatedRootPositions[frame], _generatedRootPositions[nextFrame], blend);
         }
 
+        /// <summary>
+        /// Returns the world-space displacement of the generated root across the current motion, from
+        /// its first frame to its last. Zero when nothing has been generated yet.
+        /// </summary>
+        public Vector3 GeneratedRootDelta()
+        {
+            if (_generatedRootPositions.Length < 2)
+            {
+                return Vector3.zero;
+            }
+
+            var first = _generatedRootPositions[0];
+            var last = _generatedRootPositions[_generatedRootPositions.Length - 1];
+            return last - first;
+        }
+
         /// <summary>Returns the generator, for diagnostics such as stage timings.</summary>
         public SomaGenerator Generator => _generator;
 

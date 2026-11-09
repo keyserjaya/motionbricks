@@ -15,4 +15,7 @@ This package combines content with different licenses. Review each before distri
 
 - Onnx Runtime — MIT License. Copyright (c) Microsoft Corporation.
 - MotionBricks (Python reference) — Apache License 2.0. Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+- The two-bone IK solver (`MbTwoBoneIk`) is derived from Daniel Holden's `ik_two_bone` implementation
+  in Motion Matching (https://github.com/orangeduck/Motion-Matching), MIT License — see
+  `motionbricks/licenses/Daniel-Holden-MIT-LICENSE.txt` in the MotionBricks repository.
 - This package is not an NVIDIA product and is not affiliated with NVIDIA.

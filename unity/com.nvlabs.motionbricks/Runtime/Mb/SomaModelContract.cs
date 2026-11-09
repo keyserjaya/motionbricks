@@ -142,6 +142,12 @@ namespace MotionBricks
         public int NumPosesToUse;
 
         /// <summary>
+        /// Hands and feet that IK pins to the target pose during playback. The corrector eases the
+        /// pinned limbs onto the target's first pose from half of the segment to its transition point.
+        /// </summary>
+        public MbTwoBoneIk.IkPin IkPinMask;
+
+        /// <summary>
         /// Token counts the model may choose for this target. Null keeps the counts of the generation config.
         /// </summary>
         public int[] AllowedTokenCounts;
@@ -150,6 +156,7 @@ namespace MotionBricks
         {
             NumPosesToUse = numPosesToUse;
             TransitionEarlyByFrames = transitionEarlyByFrames;
+            IkPinMask = MbTwoBoneIk.IkPin.None;
             AllowedTokenCounts = allowedTokenCounts;
         }
     }

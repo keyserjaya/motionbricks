@@ -27,9 +27,11 @@ import json
 import math
 from pathlib import Path
 
+import numpy as np
 import warp as wp
 
 from motionbricks.animation.animation_buffer import AnimationBuffer
+from motionbricks.animation.ik import TwoBoneIKChain, solve_two_bone_ik
 from motionbricks.io.bvh import load_bvh
 from motionbricks.io.utils import SOMA_SKELETON_PRIM_PATH, get_asset_file
 from motionbricks.io.usd import load_skeleton_from_usd
@@ -37,8 +39,11 @@ from motionbricks.model.contract import MODEL_POSES_PER_TOKEN, MODEL_SAMPLE_RATE
 from motionbricks.model.soma.contract import SOMA_N1_FP32_ONNX_PATH
 from motionbricks.model.soma.engine import MotionBricksSOMAEngine
 from motionbricks.runtime.target_pose import (
+    IKPin,
+    TargetPoseIKCorrector,
     TargetPoseInferenceParams,
     adjust_target_pose_speed,
+    create_soma_target_pose_ik_rig,
     place_target_poses,
 )
 
@@ -276,6 +281,117 @@ namespace MotionBricks
     out = FIXTURES / "golden_soma.json"
     out.write_text(json.dumps(fixture), encoding="utf-8")
     print(f"wrote {out} ({out.stat().st_size / 1e6:.1f} MB)")
+
+    export_ik_fixture(skeleton, clip, context_poses, jog)
+
+
+@wp.kernel
+def _solve_target_arm_kernel(
+    chain_array: wp.array(dtype=TwoBoneIKChain),
+    chain_index: int,
+    root_parent_index: int,
+    world_transforms: wp.array(dtype=wp.transform),
+    pinned_tip: wp.transform,
+    out_local: wp.array(dtype=wp.transform),
+):
+    """Solves one IK chain of a target pose so its tip sits at pinned_tip, and writes the chain's
+    solved local transforms back into the target pose."""
+    i = wp.tid()
+    if i == 0:
+        cfg = chain_array[chain_index]
+        root_world = world_transforms[cfg.root_index]
+        mid_world = world_transforms[cfg.mid_index]
+        tip_world = world_transforms[cfg.tip_index]
+        parent_world = wp.transform_identity()
+        if root_parent_index >= 0:
+            parent_world = world_transforms[root_parent_index]
+        hint_world = wp.transform_point(mid_world, cfg.hint_offset_local)
+        solved_root, solved_mid, solved_tip = solve_two_bone_ik(
+            1.0, parent_world, root_world, mid_world, tip_world, pinned_tip, True, hint_world)
+        out_local[cfg.root_index] = wp.mul(wp.transform_inverse(parent_world), solved_root)
+        out_local[cfg.mid_index] = wp.mul(wp.transform_inverse(solved_root), solved_mid)
+        out_local[cfg.tip_index] = wp.mul(wp.transform_inverse(solved_mid), solved_tip)
+
+
+def export_ik_fixture(skeleton, clip, context_poses, jog) -> None:
+    """Export a golden IK correction: pins a target's right hand at a point, then corrects a played
+    pose with the reference two-bone IK at several weights."""
+    # The played pose: the last frame of the walk clip's context window.
+    played = wp.empty(skeleton.num_joints, dtype=wp.transform)
+    clip.sample(1.0, played, root_offset=wp.transform_identity())
+
+    # The target: a jog window's last pose, with its right arm solved so the hand sits at a pin point.
+    target = wp.empty(skeleton.num_joints, dtype=wp.transform)
+    jog.sample(1.8, target, root_offset=wp.transform_identity())
+
+    chains = create_soma_target_pose_ik_rig(skeleton)
+    arm_index = next(i for i, chain in enumerate(chains) if chain.pin == IKPin.RIGHT_HAND)
+    arm = chains[arm_index]
+
+    world = wp.empty(skeleton.num_joints, dtype=wp.transform)
+    skeleton.compute_world_transforms(target, world)
+    world_np = world.numpy()
+    tip_row = world_np[arm.tip_index]
+    pin_point = np.array([0.4, 0.45, 0.8], dtype=np.float32)
+    pin_tx = wp.transform(wp.vec3(*pin_point), wp.quat(*tip_row[3:7]))
+
+    warp_chains = []
+    for cfg in chains:
+        warp_chain = TwoBoneIKChain()
+        warp_chain.pin = int(cfg.pin)
+        warp_chain.root_index = cfg.root_index
+        warp_chain.mid_index = cfg.mid_index
+        warp_chain.tip_index = cfg.tip_index
+        warp_chain.hint_offset_local = wp.vec3(*cfg.hint_offset_local)
+        warp_chains.append(warp_chain)
+    chains_array = wp.array(warp_chains, dtype=TwoBoneIKChain, device=skeleton.parent_indices.device)
+    parent_index = skeleton.joint_parent(arm.root_index)
+
+    wp.launch(
+        _solve_target_arm_kernel,
+        dim=1,
+        inputs=[chains_array, arm_index, parent_index, world, pin_tx],
+        outputs=[target],
+    )
+    wp.synchronize_device("cuda:0")
+
+    corrector = TargetPoseIKCorrector(skeleton, chains)
+    corrector.capture_pins(target, IKPin.RIGHT_HAND)
+
+    results = []
+    for weight in (0.0, 0.25, 0.5, 0.75, 1.0):
+        corrected = wp.clone(played)
+        corrector.apply(corrected, weight)
+        pose = corrected.numpy()
+        results.append({
+            "weight": weight,
+            "pose": [
+                {"px": fp(pose[j, 0]), "py": fp(pose[j, 1]), "pz": fp(pose[j, 2]),
+                 "qx": fp(pose[j, 3]), "qy": fp(pose[j, 4]), "qz": fp(pose[j, 5]), "qw": fp(pose[j, 6])}
+                for j in range(skeleton.num_joints)
+            ],
+        })
+
+    played_np = played.numpy()
+    target_np = target.numpy()
+    doc = {
+        "schema": 1,
+        "played_pose": [
+            {"px": fp(played_np[j, 0]), "py": fp(played_np[j, 1]), "pz": fp(played_np[j, 2]),
+             "qx": fp(played_np[j, 3]), "qy": fp(played_np[j, 4]), "qz": fp(played_np[j, 5]), "qw": fp(played_np[j, 6])}
+            for j in range(skeleton.num_joints)
+        ],
+        "target_pose": [
+            {"px": fp(target_np[j, 0]), "py": fp(target_np[j, 1]), "pz": fp(target_np[j, 2]),
+             "qx": fp(target_np[j, 3]), "qy": fp(target_np[j, 4]), "qz": fp(target_np[j, 5]), "qw": fp(target_np[j, 6])}
+            for j in range(skeleton.num_joints)
+        ],
+        "pin_mask": int(IKPin.RIGHT_HAND),
+        "results": results,
+    }
+    out = FIXTURES / "golden_ik.json"
+    out.write_text(json.dumps(doc), encoding="utf-8")
+    print(f"wrote {out} ({out.stat().st_size / 1e3:.0f} KB)")
 
 
 if __name__ == "__main__":

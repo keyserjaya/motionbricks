@@ -184,7 +184,7 @@ namespace MotionBricks.Tests
                         worstPosition = Mathf.Max(worstPosition, (expected.position - actual.position).magnitude);
                         worstRotation = Mathf.Max(
                             worstRotation,
-                            Quaternion.Angle(expected.rotation, actual.rotation) * Mathf.Deg2Rad);
+                            RotationError(expected.rotation, actual.rotation));
                     }
                 }
 
@@ -239,14 +239,79 @@ namespace MotionBricks.Tests
                 {
                     var expectedPose = expected[joint].AsPose();
                     worstPosition = Mathf.Max(worstPosition, (expectedPose.position - destination[joint].position).magnitude);
-                    worstRotation = Mathf.Max(
-                        worstRotation,
-                        Quaternion.Angle(expectedPose.rotation, destination[joint].rotation) * Mathf.Deg2Rad);
+                        worstRotation = Mathf.Max(
+                            worstRotation,
+                            RotationError(expectedPose.rotation, destination[joint].rotation));
                 }
 
                 Assert.Less(worstPosition, 1e-3f, $"joint positions differ by {worstPosition} m");
                 Assert.Less(worstRotation, 2e-3f, $"joint rotations differ by {worstRotation} rad");
             }
+        }
+
+        /// <summary>The IK corrector matches the reference two-bone IK at every weight.</summary>
+        [Test]
+        public void IkCorrectorMatchesReference()
+        {
+            var path = Path.Combine(PackagePath, "golden_ik.json");
+            Assert.IsTrue(File.Exists(path), $"The IK fixture is missing: {path}");
+            var root = MiniJson.Parse(File.ReadAllText(path)).ReadValue().AsObject();
+
+            var corrector = new TargetPoseIkCorrector(
+                _skeleton, TargetPoseIkCorrector.CreateSomaIkRig(_skeleton));
+
+            var played = ReadSinglePose(root["played_pose"]);
+            var target = ReadSinglePose(root["target_pose"]);
+            corrector.CapturePins(target, (MbTwoBoneIk.IkPin)(int)root["pin_mask"].AsNumber());
+
+            foreach (var result in root["results"].AsArray())
+            {
+                var doc = result.AsObject();
+                var expected = doc["pose"].AsArray();
+                var weight = (float)doc["weight"].AsNumber();
+
+                var actual = new Pose[_skeleton.NumJoints];
+                Array.Copy(played, actual, played.Length);
+                corrector.Apply(actual, weight);
+
+                var worstPosition = 0f;
+                var worstRotation = 0f;
+                for (var joint = 0; joint < _skeleton.NumJoints; joint++)
+                {
+                    var expectedPose = expected[joint].AsPose();
+                    worstPosition = Mathf.Max(worstPosition, (expectedPose.position - actual[joint].position).magnitude);
+                        worstRotation = Mathf.Max(
+                            worstRotation,
+                            RotationError(expectedPose.rotation, actual[joint].rotation));
+                }
+
+                Assert.Less(worstPosition, 1e-3f, $"weight {weight}: joint positions differ by {worstPosition} m");
+                Assert.Less(worstRotation, 2e-3f, $"weight {weight}: joint rotations differ by {worstRotation} rad");
+            }
+        }
+
+        /// <summary>
+        /// Returns the angle between two rotations in radians. Both quaternions are normalized first,
+        /// because fixture rounding leaves them a little off unit length and Quaternion.Angle assumes
+        /// normalized inputs.
+        /// </summary>
+        private static float RotationError(Quaternion expected, Quaternion actual)
+        {
+            var e = MbPose.Normalize(expected);
+            var a = MbPose.Normalize(actual);
+            return Quaternion.Angle(e, a) * Mathf.Deg2Rad;
+        }
+
+        private Pose[] ReadSinglePose(object value)
+        {
+            var joints = value.AsArray();
+            var result = new Pose[_skeleton.NumJoints];
+            for (var joint = 0; joint < _skeleton.NumJoints; joint++)
+            {
+                result[joint] = joints[joint].AsPose();
+            }
+
+            return result;
         }
 
         private Pose[] ReadPoses(object value)
@@ -310,3 +375,4 @@ namespace MotionBricks.Tests
         }
     }
 }
+

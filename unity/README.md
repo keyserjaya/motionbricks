@@ -41,8 +41,10 @@ uv run --with onnx --with onnxruntime python tools/unity_golden/simplify_token_o
 
 `export_golden.py` writes `Tests/Fixtures/golden_soma.json` (two chained generations with packed
 input tensors, raw ONNX outputs, and final corrected frames), `bvh_samples.json`, `mini_walk.mbvh`,
-and the runtime skeleton. The package's EditMode tests (`MotionBricks.Tests.GoldenParityTests`)
-validate the C# encode/decode/correction against those fixtures — 4/4 green.
+and the runtime skeleton. The package's EditMode golden tests validate C# encode, decode, BVH loading
+and SOMA IK against those fixtures. They replay recorded model output, not live Unity inference.
+Retargeting tests also use the project's Takagi Katsumi prefab when available and skip that fixture
+in projects that do not contain it.
 
 ### Why the ONNX needs rewiring
 
@@ -69,13 +71,77 @@ generation — comfortably real-time for transition-driven generation).
 | --- | --- | --- |
 | `Assets/Samples/MotionBricks/Scenes/GenerateAndChain.unity` | `docs/examples/generate_once.py` | Generate toward placed targets, play on a VRM avatar, chain a second generation from the last played poses |
 | `Assets/Samples/MotionBricks/Scenes/Locomotion.unity` | `docs/examples/locomotion_loop.py` | WASD/arrow steering; speed-scaled clip targets placed ahead of the avatar; regeneration at the transition point or on sharp input changes |
+| `Assets/Samples/MotionBricks/Scenes/CharPickupObject.unity` | Smart Primitives concepts | Fully automatic sequence: walk to a cube → pick it up (hand IK-pinned to the cube) → carry 3 steps → put it down → backpedal 3 steps → jump → celebrate |
 
-Both scenes show a status overlay (provider, frames, stage timings) and a foot-contact gizmo, and
-keep the camera behind the avatar (`MbCameraFollow`).
+Both interaction scenes show a status overlay (provider, state, frames, stage timings) and a
+foot-contact gizmo, and keep the camera behind the avatar (`MbCameraFollow`).
 
-Rebuild the scenes after changing the sample scripts with **Tools → MotionBricks → Build Sample
-Scenes** (the builder instantiates the project's `Takagi Katsumi` VRM prefab; point it at another
-VRM prefab to use a different avatar).
+Changes to scripts do not require rebuilding the scenes. The **Tools → MotionBricks → Build Sample
+Scenes** command recreates and saves all three scenes, so use it only when intentionally replacing
+their settings. The builder uses the project's `Takagi Katsumi` VRM prefab.
+
+## IK pins
+
+`TargetPoseIkCorrector` can capture hand and foot pins from the first target pose and apply two-bone
+IK to a SOMA pose. Setting `TargetPoseInferenceParams.IkPinMask` alone does not automatically
+capture or apply pins; the caller must invoke the corrector. Unreachable pins are clamped.
+
+The easing matches the reference character: `smoothstep(0.5, 1.0, playback progress)` — pins do
+nothing for the first half of a segment and reach full strength at the transition point. The
+pipeline order matters and mirrors the reference: **sample → IK-correct → retarget → record** — the
+corrected pose is what shows and what the next generation's context holds.
+
+`CharPickupObject` aims at the cube's top and optionally solves the avatar's own arm after retargeting,
+because a VRM's limb proportions need not match SOMA's. Avatar-space correction does not feed back
+into SOMA history. At pickup the sample logs the actual hand-to-grab-point distance and preserves the
+cube's world position when parenting it. Unreachable targets and imperfect contact remain possible.
+The sample exposes **Interaction Stand Back** and **Interaction Crouch Drop** for adjusting target
+reach. The extra hip drop preserves the SOMA target's foot positions with two-bone IK; different VRM
+foot proportions can still require tuning. Enable **Log State Transitions** to inspect the scene-space
+root and target positions for each generated segment.
+
+## Retarget Debugging
+
+Select the avatar with Gizmos enabled during Play mode. On `SomaVrmRetargeter`, enable **Draw Debug
+Joints** and choose **Avatar Anchored** to align source hips with avatar hips, or **Raw** for source
+coordinates. Enable **Draw Avatar Bones** and **Draw Bone Error Lines** for comparison. Different
+limb lengths and rest poses mean source and avatar joints need not overlap exactly. The Inspector
+also reports the captured anchor, placement yaw, height and root travel scales, missing bones, and
+actual avatar pin error. The toggle for avatar limb IK isolates the post-retarget correction.
+On the sample's `MbSampleBootstrap`, **Enable Source Ik** separately toggles pre-retarget SOMA IK.
+The bootstrap's **Backend Type** can be set to CPU before Play mode to isolate GPU-specific problems;
+the backend's automatic fallback only detects invalid logits on its initial probe.
+
+Initialize while the avatar is in its intended rest pose. The optional yaw alignment is captured at
+initialization; toggle it before entering Play mode. **Rebase Current Poses** aligns the current
+source and avatar poses without changing height scale. **Reinitialize (apply toggles)** rebuilds the
+mapping live. Two knobs for correspondence debugging: **Swap Left Right Bones** (on by default — the
+default SOMA skeleton's left/right names are mirrored relative to its geometry, its toes face +Z
+while its "Left" joints sit at +X) and **Source Facing Offset Deg** (extra placement yaw if the
+overlay is rotated relative to the avatar). Debug joint colors follow the side each joint drives:
+green = avatar left, orange = avatar right. `SomaSceneMap` converts root positions and
+directions between source and scene space; limb offsets use height scale independently of root travel
+scale. Disable and re-enable the retargeter to apply changes to RigBuilder/offscreen-update options;
+their prior states are restored when the retargeter is disabled.
+
+## Skeleton conventions (gotchas)
+
+- **Body forward is the root's local +Y** — the SOMA root frame is tilted (its rest rotation is a
+  120° diagonal). `root.rotation * Vector3.forward` is *not* the facing; it reads as a 90° error.
+  Use `root.rotation * Vector3.up` as a rig-specific proxy; the model's heading is derived from hip
+  positions and can differ during unusual poses.
+- **Static clips have no travel direction.** `CanonicalizeTarget` derives the canonical yaw from the
+  window's travel; for a static clip that travel is sub-centimeter jitter and its yaw is pure noise
+  (a crouch idle drifted 10 mm and came out rotated 88°, which threw the hand's pin out of reach).
+  The implementation falls back to the root's forward when the travel is under 3 cm.
+- **Seeding matters.** The recorder starts filled with the skeleton's T-pose reference; call
+  `MbSampleBootstrap.Seed(pose)` with a natural pose before the first generation or every generation
+  starts from a T-pose context.
+
+> **No text prompts**: the SOMA ONNX takes only pose tensors — there is no text conditioning in the
+> graph. "Prompting" movement means authoring target poses (procedurally or from clips) and
+> constraining them with pins. The Python reference's Smart Primitives (authored pose sequences with
+> translation/rotation constraints) are the larger-scale version of this authoring model.
 
 ## Platform support
 

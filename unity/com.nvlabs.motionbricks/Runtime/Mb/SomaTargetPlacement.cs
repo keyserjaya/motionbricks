@@ -120,7 +120,22 @@ namespace MotionBricks
             // ground position, so the inverse transform maps it to the ground origin with its height.
             var start = destination[0].position;
             var end = destination[(numPoses - 1) * numJoints].position;
-            var yaw = Mathf.Atan2(end.x - start.x, end.z - start.z);
+            float yaw;
+            var travel = new Vector2(end.x - start.x, end.z - start.z);
+            if (travel.magnitude > 0.03f)
+            {
+                yaw = Mathf.Atan2(travel.x, travel.y);
+            }
+            else
+            {
+                // A static window barely travels, so its travel yaw is measurement noise (a crouch
+                // idle drifted 10 mm and came out rotated 88 degrees). The SOMA root's local +Y axis
+                // is the body's forward direction — the skeleton's root frame is tilted — so take the
+                // heading from the root rotation instead.
+                var forward = destination[0].rotation * Vector3.up;
+                yaw = Mathf.Atan2(forward.x, forward.z);
+            }
+
             var origin = new Pose(
                 new Vector3(start.x, 0f, start.z),
                 Quaternion.AngleAxis(yaw * Mathf.Rad2Deg, Vector3.up));
