@@ -63,7 +63,19 @@ rule (`SomaInferenceEngineBackend.ArgMaxTokenCount`) is checked in the same run.
 
 `SomaInferenceEngineBackend` computes the token count in C# from `pred_num_token_logits` and falls
 back to the CPU backend automatically if the GPU backend returns invalid logits (~80 ms per
-generation — comfortably real-time for transition-driven generation).
+generation — comfortably real-time for transition-driven generation). Invalid logits are probed on
+every run until the first valid one, not just the first generation.
+
+Note that some GPU drivers do not merely mis-execute this model — they drop a command out of its
+compute stream: Unity's D3D12 fence then waits forever for it (`D3D12Fence::Wait(N) error: got
+N-1`), the watchdog resets the device and the editor dies with
+`Device removed reason (887a0006)` before any C# fallback can run. In practice this surfaces on
+the **second** press of Play that uses GPUCompute: the first session runs, and the next session's
+first generation hangs the device (the failure is in the GPU dispatch stream itself, not in
+dispose/lock handling — generation is synchronous and its readback is blocking, and the locks are
+main-thread only). The samples therefore default `MbSampleBootstrap._backendType` to CPU and leave
+GPUCompute opt-in; `SomaInferenceEngineBackend.Dispose` also frees the inference engine's
+still-queued deferred GPU buffer disposals so they cannot leak across play sessions.
 
 ## Samples (in the `With U` project)
 
@@ -72,12 +84,39 @@ generation — comfortably real-time for transition-driven generation).
 | `Assets/Samples/MotionBricks/Scenes/GenerateAndChain.unity` | `docs/examples/generate_once.py` | Generate toward placed targets, play on a VRM avatar, chain a second generation from the last played poses |
 | `Assets/Samples/MotionBricks/Scenes/Locomotion.unity` | `docs/examples/locomotion_loop.py` | WASD/arrow steering; speed-scaled clip targets placed ahead of the avatar; regeneration at the transition point or on sharp input changes |
 | `Assets/Samples/MotionBricks/Scenes/CharPickupObject.unity` | Smart Primitives concepts | Fully automatic sequence: walk to a cube → pick it up (hand IK-pinned to the cube) → carry 3 steps → put it down → backpedal 3 steps → jump → celebrate |
+| `Assets/Samples/MotionBricks/Scenes/CharJump.unity` | Showcase interaction boxes (no-ground area) | Fully automatic: jog to a floor gap → jump across the forbidden area box marking the pit → celebrate → turn → jump back, forever. The takeoff distance is learned from each arc, so the landing keeps clearing the far rim |
+| `Assets/Samples/MotionBricks/Scenes/CharRoll.unity` | Showcase interaction boxes (allowed area) | Fully automatic: walk to a green allowed area box → roll inside it (jump-clip stand-in until `Clips/roll.mbvh` exists) → celebrate → walk back, repeat |
 
-Both interaction scenes show a status overlay (provider, state, frames, stage timings) and a
-foot-contact gizmo, and keep the camera behind the avatar (`MbCameraFollow`).
+All five scenes show a status overlay (provider, state, frames, stage timings) and a foot-contact
+gizmo, and keep the camera behind the avatar (`MbCameraFollow`).
+
+### Area boxes
+
+The new scenes' green boxes demonstrate area-constrained motion. The SOMA generator itself has no
+area constraints — `MbAreaBox` (`MbAreaMode.Allowed` / `Forbidden`) is a sample component that:
+
+- draws a green wireframe over the game view (red while violated),
+- reports the violation depth the demos show in their overlay, and
+- hardens the promise through the demos' **Root Clamp** toggle (on by default): the bootstrap's
+  `PoseFilter` hook runs after IK and before retargeting/recording, snapping the root into the
+  allowed footprint or out of the forbidden volume. The corrected pose feeds the next generation's
+  context, exactly like IK pins do.
+
+The constraint is realized by authoring, not by a solver: `CharJump` places the jump target on the
+far rim so the endpoint correction pulls a real arc across the pit, and learns the takeoff distance
+from the measured arc; `CharRoll` places the roll target on the box plot and lets the footprint
+clamp hold the root inside it.
+
+The area box owns the gap's geometry: the demos read the takeoff and landing edges from the box
+(`MbAreaBox.NearEdgeZ` / `FarEdgeZ`), so moving or resizing the box moves the trajectory with it —
+the constraint and the motion cannot drift apart.
+
+In MotionBricks itself the boxes on Smart Primitives only trigger interactions; the "confinement"
+seen in the showcase comes from the authored target poses — these scenes reproduce that with
+takeoff/landing and roll placement math.
 
 Changes to scripts do not require rebuilding the scenes. The **Tools → MotionBricks → Build Sample
-Scenes** command recreates and saves all three scenes, so use it only when intentionally replacing
+Scenes** command recreates and saves all five scenes, so use it only when intentionally replacing
 their settings. The builder uses the project's `Takagi Katsumi` VRM prefab.
 
 ## IK pins
@@ -109,8 +148,10 @@ limb lengths and rest poses mean source and avatar joints need not overlap exact
 also reports the captured anchor, placement yaw, height and root travel scales, missing bones, and
 actual avatar pin error. The toggle for avatar limb IK isolates the post-retarget correction.
 On the sample's `MbSampleBootstrap`, **Enable Source Ik** separately toggles pre-retarget SOMA IK.
-The bootstrap's **Backend Type** can be set to CPU before Play mode to isolate GPU-specific problems;
-the backend's automatic fallback only detects invalid logits on its initial probe.
+The bootstrap's **Backend Type** defaults to CPU because GPU compute on this model can hang some
+drivers into a D3D12 device-removed editor crash; switch it to GPUCompute only where that is known
+to work. The backend's automatic fallback probes invalid logits on every run until the first valid
+one.
 
 Initialize while the avatar is in its intended rest pose. The optional yaw alignment is captured at
 initialization; toggle it before entering Play mode. **Rebase Current Poses** aligns the current
@@ -124,6 +165,79 @@ directions between source and scene space; limb offsets use height scale indepen
 scale. Disable and re-enable the retargeter to apply changes to RigBuilder/offscreen-update options;
 their prior states are restored when the retargeter is disabled.
 
+## Authoring motion clips (.mbvh)
+
+Clips are not playback animations — they are **style exemplars**. The generator transitions toward a
+clip *window* (e.g. the middle of a walk clip); everything else (locomotion to a point, reach, carry)
+is procedural: clip windows + placement + IK pins. One short clip per style is enough; the five
+bundled clips drive the whole `CharPickupObject` sequence. A `.mbvh` file is plain standard BVH text
+(`HIERARCHY` + `MOTION`) with SOMA joint names; the extension just selects the package's `BvhTextAssetImporter`.
+
+### Format requirements
+
+| Requirement | Detail |
+|---|---|
+| Joint names | Exact SOMA names, case-sensitive (`namespace:` prefixes are stripped). Missing joints keep reference transforms, so a body-only rig is fine. |
+| Units | **Centimeters** — the loader scales offsets/positions by `0.01`. A correct file has `Hips OFFSET` ≈ 100-ish. |
+| Rotation channels | Degrees, composed in the declared order (`Zrotation Yrotation Xrotation` is Blender's default and matches the bundled clips). |
+| Up axis | BVH is Y-up; Blender's exporter converts from Z-up automatically. |
+| Frame rate | From `Frame Time:` (the bundled clips use ~30 fps). |
+
+Name traps: SOMA's thigh is `LeftLeg` and the shin is `LeftShin` — not Mixamo's
+`LeftUpLeg`/`LeftLeg`. The spine is `Spine1 → Spine2 → Chest` and the neck `Neck1 → Neck2`. Body
+set: `Hips, Spine1, Spine2, Chest, Neck1, Neck2, Head, LeftShoulder, LeftArm, LeftForeArm, LeftHand,
+Right…, LeftLeg, LeftShin, LeftFoot, LeftToeBase, Right…` (fingers/jaw/eyes optional).
+
+### Blender workflow
+
+There is no SOMA FBX in the repo — the skeleton ships as USD
+(`motionbricks/assets/human/soma_base_skel_minimal_no_root.usd`) and as the joint hierarchies inside the bundled `.mbvh` clips.
+
+- **Route A (metric rig):** import the USD (Blender 4.x has built-in USD import) or rename an
+  armature to the SOMA names → animate (2–4 s per style is typical) → export BVH with
+  **Scale = 100** → rename `.bvh` to `.mbvh`.
+- **Route B (import an existing `.mbvh`):** import a bundled clip to get a correctly named armature.
+  Its offsets are centimeters, so Blender shows a 100×-size rig (hips ≈ 101 "meters") — **scale the
+  armature ×0.01 first** to normalize to meters, then follow route A.
+
+Scale rule: meters-scale rig → export Scale = 100; untouched imported cm-scale rig → export
+Scale = 1. Never combine them. Sanity-check the output: `Hips OFFSET` ≈ 100-ish and
+`Frames:` / `Frame Time:` present.
+
+### Looping animations (idle)
+
+MotionBricks does not play clips as loops — targets are windows the model generates toward. Two
+options for a looping idle:
+
+1. **Generative idle (recommended for the main character).** Author a seamless clip (first frame ≈
+   last frame, 2–4 s at 30 fps, root travel ≤ 3 cm so placement uses root facing). Each time
+   `player.TimeToTransition` hits 0, regenerate toward the same idle window at the character's
+   current position and facing — the pattern `MbCharPickupDemo` uses for its locomotion states. The
+   result is continuous standing motion with natural micro-variation, continuous across segments
+   because generations are endpoint-corrected to the recorded history. Cost: one inference per
+   segment.
+2. **Cyclic clip playback (zero inference, exact loop).** Sample `SomaClip.Sample(time % duration)`
+   each frame into `SomaVrmRetargeter.ApplyPose`. Clips share the generated motion's SOMA pose
+   space, so blending idle ↔ generated motion is a simple pose slerp — no Animator handoff needed.
+   Good for background NPCs or true loops.
+
+Practical combo: option 2 for long-idle/background states, option 1 whenever the character acts;
+transition into MotionBricks by seeding history from the current clip pose (`SeedHistoryFromPose`).
+
+### Using clips alongside a normal Animator
+
+The retargeter re-applies its pose every `LateUpdate` (order 10000) and owns its 22 humanoid bones,
+so an Animator driving those same bones is wasted work and fights the anchor — keep
+`applyRootMotion` off and no locomotion controller on the body during MotionBricks segments.
+Animators (or VRM expressions/uLipSync) driving **fingers, face, jaw, hair** — bones outside the 22
+bound ones — coexist cleanly, and MotionBricks does not drive fingers at all. Mixing Mecanim for
+*body* idle with MotionBricks for dynamic states needs a handoff plus reverse-retarget seeding
+(avatar pose → SOMA history), which the package does not implement; prefer the two loop options
+above.
+
+> The bundled sample clips are evaluation-only (`LICENSES/NOTICE.md`) — fine for prototyping; ship
+> your own exports.
+
 ## Skeleton conventions (gotchas)
 
 - **Body forward is the root's local +Y** — the SOMA root frame is tilted (its rest rotation is a
@@ -134,6 +248,11 @@ their prior states are restored when the retargeter is disabled.
   window's travel; for a static clip that travel is sub-centimeter jitter and its yaw is pure noise
   (a crouch idle drifted 10 mm and came out rotated 88°, which threw the hand's pin out of reach).
   The implementation falls back to the root's forward when the travel is under 3 cm.
+- **A jump style target must come from the clip's airborne apex.** The model takes the target's root
+  height as its cue to leave the ground. A window taken from the clip's run-up (standing height)
+  asks for a run at the landing spot, and the character jogs flat across the pit no matter how wide
+  it is. `MbCharJumpDemo` and `MbCharPickupDemo` center their jump window on the clip's apex
+  (`ApexWindowTime`), which makes the arc rise ~30 cm over standing height at any gap width.
 - **Seeding matters.** The recorder starts filled with the skeleton's T-pose reference; call
   `MbSampleBootstrap.Seed(pose)` with a natural pose before the first generation or every generation
   starts from a T-pose context.

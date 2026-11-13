@@ -259,7 +259,14 @@ namespace MotionBricks
 
         public void Dispose()
         {
-            _backgroundTask?.Wait();
+            try
+            {
+                _backgroundTask?.Wait();
+            }
+            catch (AggregateException exception)
+            {
+                Debug.LogWarning($"[MotionBricks] Background generation failed: {exception.InnerException?.Message}");
+            }
         }
     }
 }

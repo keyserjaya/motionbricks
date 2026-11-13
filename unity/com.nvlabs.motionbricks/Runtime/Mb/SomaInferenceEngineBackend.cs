@@ -14,6 +14,7 @@ namespace MotionBricks
         private Worker _worker;
         private readonly Model _model;
         private BackendType _backendType;
+        /// <summary>True while the backend may still need a CPU fallback probe.</summary>
         private bool _fallbackChecked;
         private readonly Tensor<float> _globalRootValues;
         private readonly Tensor<float> _localRootValues;
@@ -100,11 +101,11 @@ namespace MotionBricks
                     // tools/unity_golden/simplify_token_output.py.
                     if (!_fallbackChecked)
                     {
-                        _fallbackChecked = true;
                         if (HasInvalidLogits(_tokenLogitsScratch) && _backendType != BackendType.CPU)
                         {
                             // The GPU backend mis-executed the model's shape subgraphs. Re-run on the
                             // CPU backend, which produces correct results at ~80 ms per generation.
+                            _fallbackChecked = true;
                             Debug.LogWarning(
                                 "[MotionBricks] The GPU backend produced invalid logits for this model. " +
                                 "Falling back to the CPU backend.");
@@ -115,6 +116,10 @@ namespace MotionBricks
                             Run(inputs, outputs);
                             return;
                         }
+
+                        // The backend is only trusted after a run that reads valid logits: some
+                        // versions mis-execute later than the first generation.
+                        _fallbackChecked = true;
                     }
 
                     outputs.PredNumTokens[0] = ArgMaxTokenCount(_tokenLogitsScratch, inputs.AllowedPredNumTokens);
@@ -203,6 +208,7 @@ namespace MotionBricks
 
         public void Dispose()
         {
+            ReleaseDeferredGpuDisposals();
             lock (_lock)
             {
                 _globalRootValues?.Dispose();
@@ -215,6 +221,32 @@ namespace MotionBricks
                 _predGlobalMotions?.Dispose();
                 _predNumTokens?.Dispose();
                 _worker?.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Frees the inference engine's still-queued GPU buffer disposals deterministically before
+        /// the worker goes away. <c>ComputeTensorDataReaper</c> queues intermediate compute buffers
+        /// for deferred disposal and drops the queue without disposing on a domain reload, which
+        /// leaks GPU memory across play sessions. This only drains the synchronous queue; it never
+        /// waits on GPU work, because a blocked wait hangs the editor once the device is unhealthy.
+        /// </summary>
+        private static void ReleaseDeferredGpuDisposals()
+        {
+            try
+            {
+                var reaper = typeof(Worker).Assembly.GetType("Unity.InferenceEngine.ComputeTensorDataReaper");
+                reaper?.GetMethod(
+                        "ProcessDisposeQueue",
+                        System.Reflection.BindingFlags.Static |
+                        System.Reflection.BindingFlags.NonPublic |
+                        System.Reflection.BindingFlags.Public)
+                    ?.Invoke(null, null);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning(
+                    $"[MotionBricks] Could not release the inference engine's deferred GPU disposals: {exception.Message}");
             }
         }
     }
